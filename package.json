@@ -1,0 +1,19 @@
+{
+  "name": "claude-feishu-controller",
+  "version": "1.0.0",
+  "description": "Claude Code 飞书开放平台远程控制器",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "start:websocket": "node server-ws.js",
+    "start:webhook": "node server-webhook.js",
+    "install": "npm install @larksuiteoapi/node-sdk",
+    "deploy": "bash deploy.sh"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.58.0",
+    "dotenv": "^17.2.3",
+    "ws": "^8.14.0"
+  }
+}
