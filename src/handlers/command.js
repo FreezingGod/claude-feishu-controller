@@ -99,10 +99,14 @@ export async function handleSwitchTo(ctx, sessionName) {
 
     // 获取新 session 的工作目录，用于更新 transcript 监控路径
     const workingDir = await TmuxSession.getWorkingDir(sessionName);
-    if (workingDir && ctx.transcriptMonitor) {
+    if (ctx.transcriptMonitor) {
+      // 更新 tmux session 名称
+      ctx.transcriptMonitor.setTmuxSession(sessionName);
       // 更新 transcript 监控器的项目路径
-      ctx.transcriptMonitor.updateProjectPath(workingDir);
-      Logger.transcript(`Transcript 监控路径更新为: ${workingDir}`);
+      if (workingDir) {
+        ctx.transcriptMonitor.updateProjectPath(workingDir);
+        Logger.transcript(`Transcript 监控路径更新为: ${workingDir}`);
+      }
     }
 
     await ctx.sendText(

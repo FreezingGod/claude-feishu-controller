@@ -7,6 +7,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { spawn } from 'child_process';
 import Logger from './utils/logger.js';
 import { InteractionParser, InteractionType } from './monitor/interaction-parser.js';
 
@@ -302,6 +303,11 @@ export class TranscriptMonitor {
     // 当前 session ID（用于定位 subagents 目录）
     this.currentSessionId = null;
 
+    // 当前 tmux 会话名称（用于获取工作目录）
+    this.tmuxSessionName = options.tmuxSessionName || null;
+    this.lastProjectPathCheck = 0;
+    this.projectPathCheckInterval = 5000; // 每 5 秒检查一次项目路径变化
+
     // 定时器
     this.intervalId = null;
 
@@ -350,6 +356,7 @@ export class TranscriptMonitor {
 
   /**
    * 获取当前 session ID
+   * 通过查找最新的 .jsonl 文件或 session 目录来确定
    * @param {boolean} forceRefresh - 是否强制刷新缓存
    * @returns {string|null} session ID 或 null
    */
@@ -368,23 +375,52 @@ export class TranscriptMonitor {
         return null;
       }
 
-      // 查找最新的 session 目录
-      const sessionDirs = fs.readdirSync(projectDir)
-        .filter(f => {
-          const dirPath = path.join(projectDir, f);
-          return fs.statSync(dirPath).isDirectory();
-        })
-        .map(f => ({
-          name: f,
-          path: path.join(projectDir, f),
-          mtime: fs.statSync(path.join(projectDir, f)).mtime.getTime()
-        }))
-        .sort((a, b) => b.mtime - a.mtime);
+      // 收集所有候选 session（目录 + .jsonl 文件）
+      const candidates = [];
 
-      Logger.debug(`找到 ${sessionDirs.length} 个 session 目录`);
+      // 1. 查找所有 session 目录
+      const dirs = fs.readdirSync(projectDir).filter(f => {
+        const dirPath = path.join(projectDir, f);
+        return fs.statSync(dirPath).isDirectory();
+      });
+      for (const d of dirs) {
+        candidates.push({
+          id: d,
+          mtime: fs.statSync(path.join(projectDir, d)).mtime.getTime(),
+          type: 'dir'
+        });
+      }
 
-      if (sessionDirs.length > 0) {
-        const newSessionId = sessionDirs[0].name;
+      // 2. 查找所有 .jsonl 文件（格式: {uuid}.jsonl）
+      const files = fs.readdirSync(projectDir).filter(f => {
+        return f.endsWith('.jsonl') &&
+               /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/i.test(f);
+      });
+      for (const f of files) {
+        // 从文件名提取 session ID（去掉 .jsonl 后缀）
+        const sessionId = f.replace(/\.jsonl$/, '');
+        const mtime = fs.statSync(path.join(projectDir, f)).mtime.getTime();
+
+        // 如果已经存在同名目录，更新其 mtime（取最大值）
+        const existing = candidates.find(c => c.id === sessionId);
+        if (existing) {
+          existing.mtime = Math.max(existing.mtime, mtime);
+        } else {
+          candidates.push({
+            id: sessionId,
+            mtime: mtime,
+            type: 'file'
+          });
+        }
+      }
+
+      // 按 mtime 降序排序，获取最新的 session
+      candidates.sort((a, b) => b.mtime - a.mtime);
+
+      Logger.debug(`找到 ${candidates.length} 个 session 候选`);
+
+      if (candidates.length > 0) {
+        const newSessionId = candidates[0].id;
         // 检测 session 是否变化
         if (this.currentSessionId !== newSessionId) {
           if (this.currentSessionId) {
@@ -413,7 +449,7 @@ export class TranscriptMonitor {
         return this.currentSessionId;
       }
 
-      Logger.debug(`没有找到任何 session 目录`);
+      Logger.debug(`没有找到任何 session`);
       return null;
     } catch (error) {
       Logger.error(`获取 session ID 失败: ${error.message}`);
@@ -438,6 +474,49 @@ export class TranscriptMonitor {
     // 设置标志：正在等待新 session
     this.waitingForNewSession = true;
     Logger.transcript(`记录上一 session: ${this.lastProcessedSessionId || 'none'}，等待新 session 创建`);
+  }
+
+  /**
+   * 获取 tmux 会话的当前工作目录
+   * @param {string} sessionName - tmux 会话名称
+   * @returns {Promise<string|null>} 工作目录路径或 null
+   */
+  getTmuxSessionWorkingDir(sessionName) {
+    if (!sessionName) {
+      return Promise.resolve(null);
+    }
+
+    return new Promise((resolve) => {
+      const proc = spawn('tmux', ['display-message', '-p', '-t', sessionName, '#{pane_current_path}'], {
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      proc.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+
+      proc.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      proc.on('close', (code) => {
+        if (code === 0 && stdout.trim()) {
+          resolve(stdout.trim());
+        } else {
+          Logger.debug(`获取 tmux 会话 ${sessionName} 工作目录失败: ${stderr || 'exit code ' + code}`);
+          resolve(null);
+        }
+      });
+
+      // 2 秒超时
+      setTimeout(() => {
+        proc.kill();
+        resolve(null);
+      }, 2000);
+    });
   }
 
   /**
@@ -476,6 +555,21 @@ export class TranscriptMonitor {
     this._lastLoggedSessionId = null;
 
     Logger.transcript(`Transcript 监控已更新到新项目: ${newProjectDir}`);
+  }
+
+  /**
+   * 设置 tmux 会话名称（用于切换会话时）
+   * @param {string} sessionName - tmux 会话名称
+   */
+  setTmuxSession(sessionName) {
+    if (this.tmuxSessionName === sessionName) {
+      return;
+    }
+
+    Logger.transcript(`切换 tmux 会话: ${this.tmuxSessionName || 'none'} -> ${sessionName}`);
+    this.tmuxSessionName = sessionName;
+    // 立即触发项目路径检查
+    this.lastProjectPathCheck = 0;
   }
 
   /**
@@ -959,6 +1053,19 @@ export class TranscriptMonitor {
       }
 
       this.lastMemoryCheck = now;
+    }
+
+    // 动态更新项目路径（根据 tmux 会话的工作目录）
+    if (this.tmuxSessionName && (now - this.lastProjectPathCheck > this.projectPathCheckInterval)) {
+      this.lastProjectPathCheck = now;
+      const workingDir = await this.getTmuxSessionWorkingDir(this.tmuxSessionName);
+      if (workingDir && workingDir !== this.projectPath) {
+        Logger.transcript(`检测到项目路径变化: ${this.projectPath} -> ${workingDir}`);
+        this.updateProjectPath(workingDir);
+        // 清理旧的监控状态，因为项目变了
+        this.watchedFiles.clear();
+        this.currentSessionId = null;
+      }
     }
 
     // 打印当前 session ID（仅第一次或 session 变化时）
