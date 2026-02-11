@@ -445,8 +445,23 @@ async function main() {
     // 打印启动信息
     printStartupInfo();
 
-    // 启动监控
-    startMonitorPolling();
+    // 自动检测并使用第一个可用会话
+    await sessionManager.autoSelectSession();
+
+    // 如果有可用会话，更新 commander、设置 transcript 监控的 tmux session，并启动监控
+    if (sessionManager.getCurrentSession()) {
+      const sessionName = sessionManager.getCurrentSession();
+      commander = new TmuxCommander(sessionName);
+      // 设置 transcript 监控的 tmux session 和 commander，使其能够动态获取工作目录并检测 Plan Mode
+      if (transcriptMonitor) {
+        transcriptMonitor.setTmuxSession(sessionName);
+        transcriptMonitor.setTmuxCommander(commander);
+        Logger.info(`📝 Transcript 监控将跟踪 tmux 会话: ${sessionName}`);
+      }
+      startMonitorPolling();
+    } else {
+      Logger.warn('⚠️  没有可用会话，监控未启动，请使用 /new 命令创建会话');
+    }
 
     // 启动 WebSocket
     await startWebSocketClient();

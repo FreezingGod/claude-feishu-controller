@@ -1,7 +1,7 @@
 /**
  * 会话管理器
  * Author: CodePothunter
- * Version: 1.1.0 - 修复 session 加载竞态条件
+ * Version: 1.2.0 - 自动检测并使用第一个可用 session
  */
 
 import fs from 'fs';
@@ -9,6 +9,7 @@ import path from 'path';
 import { config } from './config/index.js';
 import { BufferManager } from './monitor/buffer.js';
 import Logger from './utils/logger.js';
+import { TmuxSession } from './tmux/session.js';
 
 /**
  * 会话管理器类
@@ -45,9 +46,46 @@ export class SessionManager {
       if (e.code !== 'ENOENT') {
         Logger.warn(`读取 session 配置失败: ${e.message}`);
       }
-      // 文件不存在是正常情况，使用默认值
+      // 文件不存在是正常情况，留空等待自动检测
     }
-    this.currentSession.value = config.session.defaultName;
+    // 不再设置默认值，留空等待异步自动检测
+  }
+
+  /**
+   * 异步初始化：自动检测并使用第一个可用会话
+   * 需要在服务启动后调用
+   */
+  async autoSelectSession() {
+    // 如果已经有会话，检查是否仍然存在
+    const current = this.currentSession.value;
+    if (current) {
+      const exists = await TmuxSession.exists(current);
+      if (exists) {
+        Logger.info(`✅ 当前会话 ${current} 存在，继续使用`);
+        return;
+      } else {
+        Logger.warn(`⚠️  当前会话 ${current} 不存在，将自动选择第一个可用会话`);
+      }
+    }
+
+    // 自动选择第一个可用会话
+    const result = await TmuxSession.list();
+    Logger.debug(`TmuxSession.list() 返回: ${JSON.stringify(result)}`);
+
+    if (result.error) {
+      Logger.error(`获取 tmux 会话列表失败: ${result.error}`);
+      this.currentSession.value = '';
+      return;
+    }
+
+    if (result.sessions && result.sessions.length > 0) {
+      this.currentSession.value = result.sessions[0];
+      this.saveSync(result.sessions[0]);
+      Logger.info(`🔄 自动选择第一个可用会话: ${result.sessions[0]}`);
+    } else {
+      Logger.warn(`⚠️  没有可用的 tmux 会话，请先创建或使用 /new 命令创建`);
+      this.currentSession.value = '';
+    }
   }
 
   /**

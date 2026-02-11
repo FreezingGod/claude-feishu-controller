@@ -220,6 +220,81 @@ kill <PID>
 pm2 stop claude-bridge
 ```
 
+### Systemd 系统服务（推荐）
+
+#### 服务管理脚本
+
+项目已配置为 systemd 系统服务，支持开机自启和自动重启。
+
+使用管理脚本（推荐）：
+
+```bash
+# 启动服务
+./manage.sh start
+
+# 停止服务
+./manage.sh stop
+
+# 重启服务
+./manage.sh restart
+
+# 查看服务状态
+./manage.sh status
+
+# 查看实时日志
+./manage.sh logs
+
+# 查看错误日志
+./manage.sh logs-failed
+```
+
+#### 手动 systemctl 命令
+
+```bash
+# 启动服务
+sudo systemctl start claude-feishu-controller
+
+# 停止服务
+sudo systemctl stop claude-feishu-controller
+
+# 重启服务
+sudo systemctl restart claude-feishu-controller
+
+# 查看服务状态
+sudo systemctl status claude-feishu-controller
+
+# 开机自启
+sudo systemctl enable claude-feishu-controller
+
+# 取消开机自启
+sudo systemctl disable claude-feishu-controller
+
+# 查看日志（实时）
+sudo journalctl -u claude-feishu-controller -f
+
+# 查看日志（最近100行）
+sudo journalctl -u claude-feishu-controller -n 100
+```
+
+#### 服务特性
+
+- ✅ **开机自启**：系统启动后自动运行
+- ✅ **崩溃重启**：服务异常退出后自动重启（10秒延迟）
+- ✅ **日志管理**：所有日志记录在 systemd journal
+- ✅ **资源限制**：限制文件描述符数量为 65536
+- ✅ **安全加固**：使用 PrivateTmp、ProtectSystem 等安全选项
+
+#### 服务配置
+
+服务文件位置：`/etc/systemd/system/claude-feishu-controller.service`
+
+主要配置：
+- 工作目录：`/home/ubuntu/projects/claude-feishu-controller`
+- 运行用户：`ubuntu`
+- 启动命令：`npm start`
+- 重启策略：`always`（总是重启）
+- 重启延迟：10 秒
+
 ### 命令参考
 
 #### 基础交互
@@ -299,11 +374,29 @@ for (const detector of detectors) {
 
 Transcript 监控器会：
 
-1. 监控 `~/.claude/projects/{project}/{sessionId}.jsonl` 文件
-2. 检测新的 assistant 消息（通过 UUID 去重）
-3. 将消息内容推送到飞书
-4. 支持多 subagent 文件监控
-5. 持久化已处理消息，防止重启后重发
+1. **动态项目检测**：自动检测当前 tmux 会话的工作目录，切换到对应项目
+2. **智能 Session 检测**：同时检查 `.jsonl` 文件和目录，兼容 Claude Code 不同版本
+3. 监控 `~/.claude/projects/{project}/{sessionId}.jsonl` 文件
+4. 检测新的 assistant 消息（通过 UUID 去重）
+5. 将消息内容推送到飞书
+6. 支持多 subagent 文件监控
+7. 持久化已处理消息，防止重启后重发
+
+#### 工作原理
+
+```javascript
+// 1. 获取 tmux 会话的工作目录
+const workingDir = await tmux.displayMessage('#{pane_current_path}');
+
+// 2. 转换为 Claude Code 项目路径
+// /home/ubuntu/wiki -> ~/.claude/projects/-home-ubuntu-projects-wiki
+
+// 3. 查找最新的 session（文件或目录）
+const sessionId = findLatestSession(projectDir);
+
+// 4. 监控对应的 transcript 文件
+watchFile(`${projectDir}/${sessionId}.jsonl`);
+```
 
 ### 消息路由流程
 
@@ -410,6 +503,41 @@ tmux list-sessions -F "#{session_name}"
 
 # 创建测试会话
 tmux new-session -d -s test
+```
+
+### 问题：Systemd 服务无法启动
+
+```bash
+# 检查服务状态
+sudo systemctl status claude-feishu-controller
+
+# 查看详细日志
+sudo journalctl -u claude-feishu-controller -n 50 --no-pager
+
+# 检查服务文件
+sudo cat /etc/systemd/system/claude-feishu-controller.service
+
+# 重载 systemd 配置
+sudo systemctl daemon-reload
+
+# 重启服务
+sudo systemctl restart claude-feishu-controller
+```
+
+### 问题：服务频繁重启
+
+```bash
+# 查看重启历史
+sudo journalctl -u claude-feishu-controller --grep="restarted" -n 20
+
+# 查看错误日志
+sudo journalctl -u claude-feishu-controller -p err -n 50
+
+# 临时禁用自动重启调试
+# 编辑服务文件，将 Restart=always 改为 Restart=no
+# 然后重载并重启
+sudo systemctl daemon-reload
+sudo systemctl restart claude-feishu-controller
 ```
 
 ---

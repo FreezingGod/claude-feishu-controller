@@ -12,6 +12,7 @@ import Logger from '../utils/logger.js';
  */
 export const InteractionType = {
   ASK_USER_QUESTION: 'ask_user_question',
+  EXIT_PLAN_MODE: 'exit_plan_mode',  // Plan Mode 完成确认
   // 未来可扩展：
   // CONFIRMATION: 'confirmation',
   // TAB_SELECTION: 'tab_selection',
@@ -175,17 +176,105 @@ export class InteractionParser {
   /**
    * 解析交互消息（自动识别类型）
    * @param {Object} data - jsonl 消息数据
+   * @param {string} tmuxContent - tmux 终端内容（用于检测 Plan Mode 等终端特有状态）
    * @returns {Object|null} - 解析后的交互数据
    */
-  parse(data) {
+  parse(data, tmuxContent = null) {
     // 优先解析 AskUserQuestion
     if (this.isAskUserQuestion(data)) {
       return this.parseAskUserQuestion(data);
     }
 
+    // 检测 Plan Mode 完成确认（从 tmux 终端内容）
+    if (tmuxContent && this.isExitPlanMode(tmuxContent)) {
+      return this.parseExitPlanMode(tmuxContent);
+    }
+
     // 未来可扩展其他交互类型
 
     return null;
+  }
+
+  /**
+   * 判断 tmux 内容是否包含 Plan Mode 完成确认
+   * Plan Mode 的特征：
+   * - "Claude has written up a plan and is ready to execute"
+   * - "Would you like to proceed?"
+   * - 选项列表 "❯ 1. Yes, clear context..."
+   * @param {string} content - tmux 终端内容
+   * @returns {boolean}
+   */
+  isExitPlanMode(content) {
+    if (!content || typeof content !== 'string') {
+      return false;
+    }
+
+    // 检测 Plan Mode 完成确认的特征
+    const hasPlanPrompt = content.includes('written up a plan') &&
+                          content.includes('Would you like to proceed');
+
+    // 检测选项列表（带有数字编号的选项）
+    const hasOptions = /^\s*❯\s*\d+\./m.test(content) ||
+                      /^\s*\d+\.\s+Yes,/m.test(content);
+
+    return hasPlanPrompt && hasOptions;
+  }
+
+  /**
+   * 解析 Plan Mode 完成确认
+   * @param {string} content - tmux 终端内容
+   * @returns {Object|null} - 解析后的交互数据
+   */
+  parseExitPlanMode(content) {
+    try {
+      // 提取选项列表
+      const options = [];
+
+      // 按行分割，查找选项行
+      const lines = content.split('\n');
+      for (const line of lines) {
+        // 匹配两种格式:
+        // 1. " ❯ 1. Yes, clear context..." (带 ❯)
+        // 2. "   2. Yes, and bypass permissions" (不带 ❯，但需要上下文判断)
+        const matchWithCursor = line.match(/❯\s*(\d+)\.\s+(.+)$/);
+        const matchWithoutCursor = line.match(/^\s{3}(\d+)\.\s+(.+)$/); // 3个空格开头表示选项
+
+        if (matchWithCursor) {
+          const num = parseInt(matchWithCursor[1], 10);
+          const text = matchWithCursor[2].trim();
+          if (text) {
+            options.push({ num, label: text, value: text });
+          }
+        } else if (matchWithoutCursor) {
+          const num = parseInt(matchWithoutCursor[1], 10);
+          const text = matchWithoutCursor[2].trim();
+          if (text) {
+            options.push({ num, label: text, value: text });
+          }
+        }
+      }
+
+      // 提取计划文件路径（如果存在）
+      let planFilePath = null;
+      const planFileMatch = content.match(/ctrl-g to edit in Vim\s+·\s+(.+?\.md)/);
+      if (planFileMatch) {
+        planFilePath = planFileMatch[1].trim();
+      }
+
+      return {
+        type: InteractionType.EXIT_PLAN_MODE,
+        question: {
+          header: '📋 计划已生成',
+          text: 'Claude 已完成计划编写，请选择下一步操作：',
+          options: options,
+          multiSelect: false,
+        },
+        planFilePath: planFilePath,
+      };
+    } catch (error) {
+      Logger.error(`解析 ExitPlanMode 失败: ${error.message}`);
+      return null;
+    }
   }
 
   /**

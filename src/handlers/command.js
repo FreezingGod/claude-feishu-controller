@@ -19,8 +19,8 @@ class CommandContext {
     this.sessionManager = sessionManager;
   }
 
-  async sendText(text) {
-    return this.messenger.sendText(text);
+  async sendText(text, options = {}) {
+    return this.messenger.sendText(text, options);
   }
 }
 
@@ -99,10 +99,14 @@ export async function handleSwitchTo(ctx, sessionName) {
 
     // 获取新 session 的工作目录，用于更新 transcript 监控路径
     const workingDir = await TmuxSession.getWorkingDir(sessionName);
-    if (workingDir && ctx.transcriptMonitor) {
+    if (ctx.transcriptMonitor) {
+      // 更新 tmux session 名称
+      ctx.transcriptMonitor.setTmuxSession(sessionName);
       // 更新 transcript 监控器的项目路径
-      ctx.transcriptMonitor.updateProjectPath(workingDir);
-      Logger.transcript(`Transcript 监控路径更新为: ${workingDir}`);
+      if (workingDir) {
+        ctx.transcriptMonitor.updateProjectPath(workingDir);
+        Logger.transcript(`Transcript 监控路径更新为: ${workingDir}`);
+      }
     }
 
     await ctx.sendText(
@@ -192,7 +196,8 @@ export async function handleShow(ctx) {
     const cleaned = cleanContent(content, 80);
 
     const message = `📺 **当前会话: ${ctx.currentSession.value}**\n\n\`\`\`\n${cleaned}\n\`\`\``;
-    await ctx.sendText(message);
+    // 跳过去重检查，因为用户可能多次执行 /show 查看最新状态
+    await ctx.sendText(message, { skipDedup: true });
   } catch (error) {
     Logger.error(`/show 命令失败: ${error.message}`);
     await ctx.sendText(`❌ /show 命令失败: ${error.message}`);

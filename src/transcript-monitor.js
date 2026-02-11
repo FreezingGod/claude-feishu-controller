@@ -7,6 +7,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { spawn } from 'child_process';
 import Logger from './utils/logger.js';
 import { InteractionParser, InteractionType } from './monitor/interaction-parser.js';
 
@@ -302,6 +303,11 @@ export class TranscriptMonitor {
     // 当前 session ID（用于定位 subagents 目录）
     this.currentSessionId = null;
 
+    // 当前 tmux 会话名称（用于获取工作目录）
+    this.tmuxSessionName = options.tmuxSessionName || null;
+    this.lastProjectPathCheck = 0;
+    this.projectPathCheckInterval = 5000; // 每 5 秒检查一次项目路径变化
+
     // 定时器
     this.intervalId = null;
 
@@ -319,10 +325,14 @@ export class TranscriptMonitor {
     this.lastSessionCheckTime = null;
     this.sessionCheckInterval = 10000; // 每 10 秒强制刷新一次 session ID
 
-    // 内存监控
-    this.lastMemoryCheck = Date.now();
-    this.memoryCheckInterval = 10000; // 每 10 秒检查一次
-    this.heapThreshold = 500 * 1024 * 1024; // 500MB 阈值
+    // Tmux commander（用于获取终端内容）
+    this.tmuxCommander = options.tmuxCommander || null;
+
+    // Plan Mode 检测状态
+    this.lastPlanModeCheck = 0;
+    this.planModeCheckInterval = 5000; // 每 5 秒检查一次 Plan Mode
+    this.lastNotifiedPlanModeContent = null; // 上次通知的 Plan Mode 内容哈希
+    this.lastPlanModeNotifyTime = null; // 上次通知的时间戳
 
     // 初始化交互消息解析器
     this.interactionParser = new InteractionParser();
@@ -349,7 +359,17 @@ export class TranscriptMonitor {
   }
 
   /**
+   * 设置 tmux commander（用于获取终端内容）
+   * @param {Object} tmuxCommander - tmux 命令执行器实例
+   */
+  setTmuxCommander(tmuxCommander) {
+    this.tmuxCommander = tmuxCommander;
+    Logger.transcript('已设置 Tmux Commander');
+  }
+
+  /**
    * 获取当前 session ID
+   * 通过查找最新的 .jsonl 文件或 session 目录来确定
    * @param {boolean} forceRefresh - 是否强制刷新缓存
    * @returns {string|null} session ID 或 null
    */
@@ -368,23 +388,52 @@ export class TranscriptMonitor {
         return null;
       }
 
-      // 查找最新的 session 目录
-      const sessionDirs = fs.readdirSync(projectDir)
-        .filter(f => {
-          const dirPath = path.join(projectDir, f);
-          return fs.statSync(dirPath).isDirectory();
-        })
-        .map(f => ({
-          name: f,
-          path: path.join(projectDir, f),
-          mtime: fs.statSync(path.join(projectDir, f)).mtime.getTime()
-        }))
-        .sort((a, b) => b.mtime - a.mtime);
+      // 收集所有候选 session（目录 + .jsonl 文件）
+      const candidates = [];
 
-      Logger.debug(`找到 ${sessionDirs.length} 个 session 目录`);
+      // 1. 查找所有 session 目录
+      const dirs = fs.readdirSync(projectDir).filter(f => {
+        const dirPath = path.join(projectDir, f);
+        return fs.statSync(dirPath).isDirectory();
+      });
+      for (const d of dirs) {
+        candidates.push({
+          id: d,
+          mtime: fs.statSync(path.join(projectDir, d)).mtime.getTime(),
+          type: 'dir'
+        });
+      }
 
-      if (sessionDirs.length > 0) {
-        const newSessionId = sessionDirs[0].name;
+      // 2. 查找所有 .jsonl 文件（格式: {uuid}.jsonl）
+      const files = fs.readdirSync(projectDir).filter(f => {
+        return f.endsWith('.jsonl') &&
+               /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/i.test(f);
+      });
+      for (const f of files) {
+        // 从文件名提取 session ID（去掉 .jsonl 后缀）
+        const sessionId = f.replace(/\.jsonl$/, '');
+        const mtime = fs.statSync(path.join(projectDir, f)).mtime.getTime();
+
+        // 如果已经存在同名目录，更新其 mtime（取最大值）
+        const existing = candidates.find(c => c.id === sessionId);
+        if (existing) {
+          existing.mtime = Math.max(existing.mtime, mtime);
+        } else {
+          candidates.push({
+            id: sessionId,
+            mtime: mtime,
+            type: 'file'
+          });
+        }
+      }
+
+      // 按 mtime 降序排序，获取最新的 session
+      candidates.sort((a, b) => b.mtime - a.mtime);
+
+      Logger.debug(`找到 ${candidates.length} 个 session 候选`);
+
+      if (candidates.length > 0) {
+        const newSessionId = candidates[0].id;
         // 检测 session 是否变化
         if (this.currentSessionId !== newSessionId) {
           if (this.currentSessionId) {
@@ -413,7 +462,7 @@ export class TranscriptMonitor {
         return this.currentSessionId;
       }
 
-      Logger.debug(`没有找到任何 session 目录`);
+      Logger.debug(`没有找到任何 session`);
       return null;
     } catch (error) {
       Logger.error(`获取 session ID 失败: ${error.message}`);
@@ -438,6 +487,49 @@ export class TranscriptMonitor {
     // 设置标志：正在等待新 session
     this.waitingForNewSession = true;
     Logger.transcript(`记录上一 session: ${this.lastProcessedSessionId || 'none'}，等待新 session 创建`);
+  }
+
+  /**
+   * 获取 tmux 会话的当前工作目录
+   * @param {string} sessionName - tmux 会话名称
+   * @returns {Promise<string|null>} 工作目录路径或 null
+   */
+  getTmuxSessionWorkingDir(sessionName) {
+    if (!sessionName) {
+      return Promise.resolve(null);
+    }
+
+    return new Promise((resolve) => {
+      const proc = spawn('tmux', ['display-message', '-p', '-t', sessionName, '#{pane_current_path}'], {
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      proc.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+
+      proc.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      proc.on('close', (code) => {
+        if (code === 0 && stdout.trim()) {
+          resolve(stdout.trim());
+        } else {
+          Logger.debug(`获取 tmux 会话 ${sessionName} 工作目录失败: ${stderr || 'exit code ' + code}`);
+          resolve(null);
+        }
+      });
+
+      // 2 秒超时
+      setTimeout(() => {
+        proc.kill();
+        resolve(null);
+      }, 2000);
+    });
   }
 
   /**
@@ -476,6 +568,21 @@ export class TranscriptMonitor {
     this._lastLoggedSessionId = null;
 
     Logger.transcript(`Transcript 监控已更新到新项目: ${newProjectDir}`);
+  }
+
+  /**
+   * 设置 tmux 会话名称（用于切换会话时）
+   * @param {string} sessionName - tmux 会话名称
+   */
+  setTmuxSession(sessionName) {
+    if (this.tmuxSessionName === sessionName) {
+      return;
+    }
+
+    Logger.transcript(`切换 tmux 会话: ${this.tmuxSessionName || 'none'} -> ${sessionName}`);
+    this.tmuxSessionName = sessionName;
+    // 立即触发项目路径检查
+    this.lastProjectPathCheck = 0;
   }
 
   /**
@@ -774,13 +881,15 @@ export class TranscriptMonitor {
   }
 
   /**
-   * 处理交互消息（AskUserQuestion 等）
+   * 处理交互消息（AskUserQuestion, ExitPlanMode 等）
    * @param {Object} interaction - 交互消息对象
    */
   async handleInteraction(interaction) {
     try {
       if (interaction.type === InteractionType.ASK_USER_QUESTION) {
         await this.handleAskUserQuestion(interaction);
+      } else if (interaction.type === InteractionType.EXIT_PLAN_MODE) {
+        await this.handleExitPlanMode(interaction);
       }
       // 未来可扩展其他交互类型
     } catch (error) {
@@ -830,6 +939,81 @@ export class TranscriptMonitor {
       await this.messenger.sendText(message);
       Logger.transcript(`已发送 AskUserQuestion (降级格式): ${question.header || question.text.substring(0, 30)}`);
     }
+
+    // 如果有回调，也通知调用方
+    if (this.onInteraction) {
+      try {
+        await this.onInteraction(interaction);
+      } catch (error) {
+        Logger.error(`交互回调执行失败: ${error.message}`);
+      }
+    }
+  }
+
+  /**
+   * 处理 ExitPlanMode 交互（Plan Mode 完成确认）
+   * @param {Object} interaction - ExitPlanMode 交互数据
+   */
+  async handleExitPlanMode(interaction) {
+    const { question, planFilePath } = interaction;
+
+    if (!this.messenger) {
+      Logger.warn('Messenger 未设置，无法发送交互消息');
+      return;
+    }
+
+    let planContent = null;
+
+    // 尝试读取计划文件内容
+    if (planFilePath) {
+      try {
+        // 展开波浪号路径
+        let fullPath = planFilePath;
+        if (fullPath.startsWith('~/')) {
+          const homeDir = process.env.HOME || '/home/ubuntu';
+          fullPath = path.join(homeDir, fullPath.substring(2));
+        }
+
+        // 检查文件是否存在
+        if (fs.existsSync(fullPath)) {
+          planContent = fs.readFileSync(fullPath, 'utf-8');
+          Logger.transcript(`已读取计划文件: ${fullPath} (${planContent.length} 字符)`);
+        } else {
+          Logger.warn(`计划文件不存在: ${fullPath}`);
+        }
+      } catch (error) {
+        Logger.error(`读取计划文件失败: ${error.message}`);
+      }
+    }
+
+    // 构建消息
+    let message = `📋 **${question.header}**\n\n`;
+
+    if (planContent) {
+      // 添加计划文件内容（使用 Markdown 格式）
+      message += `**📄 计划内容** (\`${planFilePath}\`):\n\n`;
+
+      // 限制计划内容长度，避免消息过长
+      const maxPlanLength = 5000;
+      if (planContent.length > maxPlanLength) {
+        planContent = planContent.slice(0, maxPlanLength) + `\n\n... (计划过长，已截断，共 ${planContent.length} 字符)`;
+      }
+
+      message += `${planContent}\n\n`;
+    } else if (planFilePath) {
+      message += `📄 计划文件: \`${planFilePath}\`\n\n`;
+    }
+
+    message += `**请选择下一步操作：**\n\n`;
+    if (question.options && question.options.length > 0) {
+      for (const opt of question.options) {
+        message += `${opt.num}. ${opt.label}\n`;
+      }
+    }
+    message += `\n💡 回复数字选择操作`;
+
+    await this.messenger.sendText(message);
+    Logger.transcript(`已发送 ExitPlanMode: ${planFilePath || '无文件路径'} (${planContent ? planContent.length : 0} 字符)`);
 
     // 如果有回调，也通知调用方
     if (this.onInteraction) {
@@ -961,6 +1145,19 @@ export class TranscriptMonitor {
       this.lastMemoryCheck = now;
     }
 
+    // 动态更新项目路径（根据 tmux 会话的工作目录）
+    if (this.tmuxSessionName && (now - this.lastProjectPathCheck > this.projectPathCheckInterval)) {
+      this.lastProjectPathCheck = now;
+      const workingDir = await this.getTmuxSessionWorkingDir(this.tmuxSessionName);
+      if (workingDir && workingDir !== this.projectPath) {
+        Logger.transcript(`检测到项目路径变化: ${this.projectPath} -> ${workingDir}`);
+        this.updateProjectPath(workingDir);
+        // 清理旧的监控状态，因为项目变了
+        this.watchedFiles.clear();
+        this.currentSessionId = null;
+      }
+    }
+
     // 打印当前 session ID（仅第一次或 session 变化时）
     // 定期强制刷新 session ID，以检测 session 切换（即使没有通过 /reset 命令）
     const sessionCheckNow = Date.now();
@@ -989,6 +1186,12 @@ export class TranscriptMonitor {
         this.waitingForNewSession = false;
         this.lastProcessedSessionId = null;
       }
+    }
+
+    // 检测 Plan Mode 完成确认（通过 tmux 终端内容）
+    if (this.tmuxCommander && (now - this.lastPlanModeCheck > this.planModeCheckInterval)) {
+      this.lastPlanModeCheck = now;
+      await this.checkPlanMode();
     }
 
     try {
@@ -1202,6 +1405,67 @@ export class TranscriptMonitor {
     }
 
     Logger.transcript('transcript 监控已停止');
+  }
+
+  /**
+   * 检查 Plan Mode 完成确认状态
+   * 通过 tmux 终端内容检测（不在 transcript.jsonl 中）
+   */
+  async checkPlanMode() {
+    if (!this.tmuxCommander || !this.messenger) {
+      return;
+    }
+
+    try {
+      // 捕获 tmux 终端内容
+      const tmuxContent = await this.tmuxCommander.capture(100);
+      if (!tmuxContent || tmuxContent.trim().length === 0) {
+        return;
+      }
+
+      // 使用 interactionParser 检测 Plan Mode
+      const isPlanMode = this.interactionParser.isExitPlanMode(tmuxContent);
+
+      if (isPlanMode) {
+        // 检查内容是否与上次通知的相同（避免重复通知）
+        const contentHash = this._hashPlanModeContent(tmuxContent);
+        const now = Date.now();
+
+        // 如果内容相同且上次通知时间在 5 分钟内，跳过
+        if (contentHash === this.lastNotifiedPlanModeContent &&
+            this.lastPlanModeNotifyTime &&
+            (now - this.lastPlanModeNotifyTime) < 300000) {
+          return;
+        }
+
+        // 解析 Plan Mode
+        const interaction = this.interactionParser.parseExitPlanMode(tmuxContent);
+        if (interaction) {
+          await this.handleInteraction(interaction);
+          this.lastNotifiedPlanModeContent = contentHash;
+          this.lastPlanModeNotifyTime = now;
+          Logger.transcript(`已发送 Plan Mode 通知`);
+        }
+      } else {
+        // 不在 Plan Mode 时，重置通知记录
+        this.lastNotifiedPlanModeContent = null;
+        this.lastPlanModeNotifyTime = null;
+      }
+    } catch (error) {
+      Logger.error(`检查 Plan Mode 失败: ${error.message}`);
+    }
+  }
+
+  /**
+   * 生成 Plan Mode 内容的哈希值（用于去重）
+   * @param {string} content - tmux 内容
+   * @returns {string} - 哈希值
+   */
+  _hashPlanModeContent(content) {
+    // 只哈�选项部分，忽略时间戳等变化内容
+    const lines = content.split('\n');
+    const optionLines = lines.filter(line => /^\s*❯\s*\d+\./.test(line) || /^\s*\d+\.\s+Yes/.test(line));
+    return optionLines.join('|');
   }
 }
 
