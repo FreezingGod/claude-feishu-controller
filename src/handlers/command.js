@@ -19,8 +19,8 @@ class CommandContext {
     this.sessionManager = sessionManager;
   }
 
-  async sendText(text) {
-    return this.messenger.sendText(text);
+  async sendText(text, options = {}) {
+    return this.messenger.sendText(text, options);
   }
 }
 
@@ -196,7 +196,8 @@ export async function handleShow(ctx) {
     const cleaned = cleanContent(content, 80);
 
     const message = `📺 **当前会话: ${ctx.currentSession.value}**\n\n\`\`\`\n${cleaned}\n\`\`\``;
-    await ctx.sendText(message);
+    // 跳过去重检查，因为用户可能多次执行 /show 查看最新状态
+    await ctx.sendText(message, { skipDedup: true });
   } catch (error) {
     Logger.error(`/show 命令失败: ${error.message}`);
     await ctx.sendText(`❌ /show 命令失败: ${error.message}`);

@@ -49,41 +49,41 @@ export class MessageRouter {
     });
 
     // /tab
-    this.commandHandlers.set('tab', (args) => commands.handleTab(this.context, args));
+    this.commandHandlers.set('tab', async (args) => commands.handleTab(this.context, args));
 
     // /show
-    this.commandHandlers.set('show', () => commands.handleShow(this.context));
+    this.commandHandlers.set('show', async () => commands.handleShow(this.context));
 
     // /new
-    this.commandHandlers.set('new', (args) => commands.handleNew(this.context, args));
+    this.commandHandlers.set('new', async (args) => commands.handleNew(this.context, args));
 
     // /kill
-    this.commandHandlers.set('kill', () => commands.handleKill(this.context));
+    this.commandHandlers.set('kill', async () => commands.handleKill(this.context));
 
     // /help 或 /h
-    this.commandHandlers.set('help', () => commands.handleHelp(this.context));
-    this.commandHandlers.set('h', () => commands.handleHelp(this.context));
+    this.commandHandlers.set('help', async () => commands.handleHelp(this.context));
+    this.commandHandlers.set('h', async () => commands.handleHelp(this.context));
 
     // /history
-    this.commandHandlers.set('history', () => commands.handleHistory(this.context));
+    this.commandHandlers.set('history', async () => commands.handleHistory(this.context));
 
     // /status
-    this.commandHandlers.set('status', () => commands.handleStatus(this.context, this.context.monitorState));
+    this.commandHandlers.set('status', async () => commands.handleStatus(this.context, this.context.monitorState));
 
     // /config
-    this.commandHandlers.set('config', () => commands.handleConfig(this.context));
+    this.commandHandlers.set('config', async () => commands.handleConfig(this.context));
 
     // /watch
-    this.commandHandlers.set('watch', () => commands.handleWatch(this.context));
+    this.commandHandlers.set('watch', async () => commands.handleWatch(this.context));
 
     // /clear
-    this.commandHandlers.set('clear', () => commands.handleClear(this.context));
+    this.commandHandlers.set('clear', async () => commands.handleClear(this.context));
 
     // /dedup-stats
-    this.commandHandlers.set('dedup-stats', () => commands.handleDedupStats(this.context));
+    this.commandHandlers.set('dedup-stats', async () => commands.handleDedupStats(this.context));
 
     // /reset - 清除 Claude Code context
-    this.commandHandlers.set('reset', () => commands.handleReset(this.context));
+    this.commandHandlers.set('reset', async () => commands.handleReset(this.context));
   }
 
   /**
