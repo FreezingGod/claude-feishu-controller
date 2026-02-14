@@ -334,6 +334,10 @@ export class TranscriptMonitor {
     this.lastNotifiedPlanModeContent = null; // 上次通知的 Plan Mode 内容哈希
     this.lastPlanModeNotifyTime = null; // 上次通知的时间戳
 
+    // Tool Permission 检测状态
+    this.lastNotifiedToolPermissionContent = null; // 上次通知的 Tool Permission 内容哈希
+    this.lastToolPermissionNotifyTime = null; // 上次通知的时间戳
+
     // 初始化交互消息解析器
     this.interactionParser = new InteractionParser();
 
@@ -1484,10 +1488,41 @@ export class TranscriptMonitor {
           this.lastPlanModeNotifyTime = now;
           Logger.transcript(`已发送 Plan Mode 通知`);
         }
+        // 重置 Tool Permission 状态
+        this.lastNotifiedToolPermissionContent = null;
+        this.lastToolPermissionNotifyTime = null;
       } else {
         // 不在 Plan Mode 时，重置通知记录
         this.lastNotifiedPlanModeContent = null;
         this.lastPlanModeNotifyTime = null;
+
+        // 检测工具权限确认
+        const isToolPermission = this.interactionParser.isToolPermission(tmuxContent);
+        if (isToolPermission) {
+          // 检查内容是否与上次通知的相同（避免重复通知）
+          const contentHash = this._hashToolPermissionContent(tmuxContent);
+          const now = Date.now();
+
+          // 如果内容相同且上次通知时间在 5 分钟内，跳过
+          if (contentHash === this.lastNotifiedToolPermissionContent &&
+              this.lastToolPermissionNotifyTime &&
+              (now - this.lastToolPermissionNotifyTime) < 300000) {
+            return;
+          }
+
+          // 解析工具权限确认
+          const interaction = this.interactionParser.parseToolPermission(tmuxContent);
+          if (interaction) {
+            await this.handleInteraction(interaction);
+            this.lastNotifiedToolPermissionContent = contentHash;
+            this.lastToolPermissionNotifyTime = now;
+            Logger.transcript(`已发送 Tool Permission 通知: ${interaction.toolType}`);
+          }
+        } else {
+          // 不在 Tool Permission 时，重置通知记录
+          this.lastNotifiedToolPermissionContent = null;
+          this.lastToolPermissionNotifyTime = null;
+        }
       }
     } catch (error) {
       Logger.error(`检查 Plan Mode 失败: ${error.message}`);
@@ -1500,10 +1535,28 @@ export class TranscriptMonitor {
    * @returns {string} - 哈希值
    */
   _hashPlanModeContent(content) {
-    // 只哈�选项部分，忽略时间戳等变化内容
+    // 只哈希选项部分，忽略时间戳等变化内容
     const lines = content.split('\n');
     const optionLines = lines.filter(line => /^\s*❯\s*\d+\./.test(line) || /^\s*\d+\.\s+Yes/.test(line));
     return optionLines.join('|');
+  }
+
+  /**
+   * 生成 Tool Permission 内容的哈希值（用于去重）
+   * @param {string} content - tmux 内容
+   * @returns {string} - 哈希值
+   */
+  _hashToolPermissionContent(content) {
+    // 哈希命令和选项部分
+    const lines = content.split('\n');
+    const relevantLines = lines.filter(line => {
+      // 包含命令行
+      if (/Bash command/.test(line)) return true;
+      // 包含选项行
+      if (/^\s*❯?\s*\d+\.\s+(Yes|No)/.test(line)) return true;
+      return false;
+    });
+    return relevantLines.join('|');
   }
 }
 

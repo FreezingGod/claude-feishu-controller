@@ -13,6 +13,7 @@ import Logger from '../utils/logger.js';
 export const InteractionType = {
   ASK_USER_QUESTION: 'ask_user_question',
   EXIT_PLAN_MODE: 'exit_plan_mode',  // Plan Mode 完成确认
+  TOOL_PERMISSION: 'tool_permission',  // 工具权限确认（Bash、Edit、Write 等）
   // 未来可扩展：
   // CONFIRMATION: 'confirmation',
   // TAB_SELECTION: 'tab_selection',
@@ -273,6 +274,115 @@ export class InteractionParser {
       };
     } catch (error) {
       Logger.error(`解析 ExitPlanMode 失败: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * 判断 tmux 内容是否包含工具权限确认
+   * 工具权限确认的特征：
+   * - "Bash command" / "Edit" / "Write" 等工具名称
+   * - "Do you want to proceed?"
+   * - 选项列表 "1. Yes" "❯ 2. Yes, and don't ask again..."
+   * @param {string} content - tmux 终端内容
+   * @returns {boolean}
+   */
+  isToolPermission(content) {
+    if (!content || typeof content !== 'string') {
+      return false;
+    }
+
+    // 检测权限确认的特征
+    const hasPermissionPrompt = content.includes('Do you want to proceed?');
+
+    // 检测工具类型标识（常见的工具名称）
+    const toolPatterns = [
+      /Bash command/,
+      /Edit file/,
+      /Write file/,
+      /Read file/,
+      /^Edit\s*$/m,
+      /^Write\s*$/m,
+    ];
+    const hasToolIdentifier = toolPatterns.some(pattern => pattern.test(content));
+
+    // 检测选项列表
+    const hasOptions = /^\s*❯?\s*\d+\.\s+(Yes|No)/m.test(content);
+
+    return hasPermissionPrompt && hasOptions;
+  }
+
+  /**
+   * 解析工具权限确认
+   * @param {string} content - tmux 终端内容
+   * @returns {Object|null} - 解析后的交互数据
+   */
+  parseToolPermission(content) {
+    try {
+      // 提取工具类型和命令
+      let toolType = 'Tool';
+      let command = '';
+      let description = '';
+
+      // 匹配 "Bash command" 格式
+      const bashMatch = content.match(/Bash command\s*\n\s*(.+?)(?:\n|$)/);
+      if (bashMatch) {
+        toolType = 'Bash';
+        command = bashMatch[1].trim();
+      }
+
+      // 匹配描述行（通常在命令后面）
+      const descMatch = content.match(/Bash command\s*\n\s*.+?\n\s{3}(.+?)(?:\n|$)/);
+      if (descMatch) {
+        description = descMatch[1].trim();
+      }
+
+      // 提取选项列表
+      const options = [];
+      const lines = content.split('\n');
+
+      for (const line of lines) {
+        // 匹配选项格式: "❯ 1. Yes" 或 "   2. Yes, and don't ask again..."
+        const matchWithCursor = line.match(/❯\s*(\d+)\.\s+(.+)$/);
+        const matchWithoutCursor = line.match(/^\s+(\d+)\.\s+(.+)$/);
+
+        if (matchWithCursor) {
+          const num = parseInt(matchWithCursor[1], 10);
+          const text = matchWithCursor[2].trim();
+          if (text) {
+            options.push({ num, label: text, value: text, selected: true });
+          }
+        } else if (matchWithoutCursor) {
+          const num = parseInt(matchWithoutCursor[1], 10);
+          const text = matchWithoutCursor[2].trim();
+          if (text) {
+            options.push({ num, label: text, value: text, selected: false });
+          }
+        }
+      }
+
+      // 构建问题文本
+      let questionText = `${toolType} 命令需要确认执行`;
+      if (command) {
+        questionText = `执行命令: ${command}`;
+        if (description) {
+          questionText += `\n描述: ${description}`;
+        }
+      }
+
+      return {
+        type: InteractionType.TOOL_PERMISSION,
+        toolType: toolType,
+        command: command,
+        question: {
+          header: `🔧 ${toolType} 权限`,
+          text: questionText,
+          options: options,
+          multiSelect: false,
+        },
+      };
+    } catch (error) {
+      Logger.error(`解析 ToolPermission 失败: ${error.message}`);
       return null;
     }
   }
