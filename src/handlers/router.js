@@ -88,10 +88,16 @@ export class MessageRouter {
 
   /**
    * 解析消息内容
-   * @param {Object} message - 飞书消息对象
+   * @param {Object} message - 消息对象（飞书或标准化格式）
    * @returns {string} - 解析后的文本内容
    */
   parseMessageContent(message) {
+    // 标准化消息格式（来自 Discord 等非飞书平台）
+    if (message._normalized) {
+      return sanitizeInput(message.text || '');
+    }
+
+    // 飞书消息解析
     let messageContent = '';
 
     try {
@@ -126,8 +132,12 @@ export class MessageRouter {
    * @returns {Promise<void>}
    */
   async route(message) {
-    // 检查是否是自己发送的消息
+    // 检查是否是自己发送的消息（飞书）
     if (message.sender && message.sender.sender_type === 'app') {
+      return;
+    }
+    // 过滤 bot 消息（Discord 等标准化消息）
+    if (message._isBot) {
       return;
     }
 

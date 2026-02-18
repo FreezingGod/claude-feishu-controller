@@ -9,6 +9,12 @@
  * 所有消息适配器都应该实现这个接口
  */
 export class MessengerAdapter {
+  constructor() {
+    // 默认消息长度限制（飞书）
+    this.maxMessageLength = 15000;
+    this.splitThreshold = 12000;
+  }
+
   /**
    * 发送文本消息
    * @param {string} text - 消息文本（支持 Markdown）

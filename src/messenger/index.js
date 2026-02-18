@@ -6,6 +6,7 @@
 
 export { MessengerAdapter } from './adapter.js';
 export { FeishuAdapter } from './feishu.js';
+export { DiscordAdapter } from './discord.js';
 
 export { default as adapter } from './adapter.js';
 export { default as feishu } from './feishu.js';

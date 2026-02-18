@@ -80,6 +80,13 @@ export const POLL_INTERVALS = {
   DEFAULT: 2000,
 };
 
+// Discord 消息长度限制
+export const DISCORD = {
+  MAX_MESSAGE_LENGTH: 2000,
+  MAX_EMBED_DESCRIPTION: 4096,
+  SPLIT_THRESHOLD: 1800,
+};
+
 // 去重配置
 export const DEDUPLICATION = {
   TTL: 300000,           // 5分钟

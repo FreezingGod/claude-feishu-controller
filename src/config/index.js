@@ -79,6 +79,14 @@ export const logger = {
 };
 
 /**
+ * Discord 配置
+ */
+export const discord = {
+  botToken: process.env.DISCORD_BOT_TOKEN || '',
+  channelId: process.env.DISCORD_CHANNEL_ID || '',
+};
+
+/**
  * 去重配置
  */
 export const deduplication = {
@@ -109,10 +117,29 @@ export function validateConfig() {
 }
 
 /**
+ * 验证 Discord 配置
+ */
+export function validateDiscordConfig() {
+  validateRequired({
+    DISCORD_BOT_TOKEN: discord.botToken,
+    DISCORD_CHANNEL_ID: discord.channelId,
+  });
+
+  // 验证数值范围
+  if (monitor.pollInterval < 100) {
+    throw new ConfigError('POLL_INTERVAL 不能小于 100ms');
+  }
+  if (monitor.bufferSize < 10) {
+    throw new ConfigError('BUFFER_SIZE 不能小于 10');
+  }
+}
+
+/**
  * 导出完整配置对象
  */
 export const config = {
   feishu,
+  discord,
   session,
   monitor,
   logger,

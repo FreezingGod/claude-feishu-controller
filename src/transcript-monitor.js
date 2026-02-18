@@ -884,18 +884,18 @@ export class TranscriptMonitor {
   }
 
   /**
-   * 发送消息到飞书
+   * 发送消息到消息平台
    * @param {string} text - 消息文本
    */
-  async sendToFeishu(text) {
+  async sendToMessenger(text) {
     if (!this.messenger) {
       Logger.warn('Messenger 未设置，无法发送消息');
       return;
     }
 
-    // 飞书消息长度限制（保守估计，实际API限制约50KB）
-    const MAX_SINGLE_MESSAGE = 15000;
-    const SPLIT_THRESHOLD = 12000;
+    // 从 messenger 读取平台特定的消息长度限制
+    const MAX_SINGLE_MESSAGE = this.messenger.maxMessageLength || 15000;
+    const SPLIT_THRESHOLD = this.messenger.splitThreshold || 12000;
 
     try {
       if (text.length <= SPLIT_THRESHOLD) {
@@ -905,7 +905,7 @@ export class TranscriptMonitor {
       } else {
         // 长消息分片发送
         const chunks = this.splitMessage(text, MAX_SINGLE_MESSAGE);
-        Logger.feishu(`消息过长 (${text.length} 字符)，分 ${chunks.length} 片发送`);
+        Logger.info(`消息过长 (${text.length} 字符)，分 ${chunks.length} 片发送`);
 
         for (let i = 0; i < chunks.length; i++) {
           const prefix = chunks.length > 1 ? `\`[${i + 1}/${chunks.length}]\`\n\n` : '';
@@ -1363,7 +1363,7 @@ export class TranscriptMonitor {
             if (sendResult.pureText) {
               const text = this.interactionParser.extractText(data);
               if (text) {
-                await this.sendToFeishu(text);
+                await this.sendToMessenger(text);
               }
             }
 
